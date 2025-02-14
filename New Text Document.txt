@@ -1,0 +1,151 @@
+package main
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"log"
+	"os"
+
+	"github.com/boltdb/bolt"
+)
+
+const dbFile = "passwords.db"
+const bucketName = "Passwords"
+var encryptionKey = []byte("examplekey123456") // Должен быть 16, 24 или 32 байта
+
+// encrypt шифрует строку, используя AES
+func encrypt(data string) (string, error) {
+	block, err := aes.NewCipher(encryptionKey)
+	if err != nil {
+		return "", err
+	}
+	ciphertext := make([]byte, aes.BlockSize+len(data))
+	iv := ciphertext[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return "", err
+	}
+	encrypter := cipher.NewCFBEncrypter(block, iv)
+	encrypter.XORKeyStream(ciphertext[aes.BlockSize:], []byte(data))
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decrypt расшифровывает строку, используя AES
+func decrypt(data string) (string, error) {
+	ciphertext, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(encryptionKey)
+	if err != nil {
+		return "", err
+	}
+	iv := ciphertext[:aes.BlockSize]
+	ciphertext = ciphertext[aes.BlockSize:]
+	decrypter := cipher.NewCFBDecrypter(block, iv)
+	decrypter.XORKeyStream(ciphertext, ciphertext)
+	return string(ciphertext), nil
+}
+
+// savePassword сохраняет зашифрованный пароль в BoltDB
+func savePassword(db *bolt.DB, service, password string) error {
+	encryptedPass, err := encrypt(password)
+	if err != nil {
+		return err
+	}
+	return db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketName))
+		return b.Put([]byte(service), []byte(encryptedPass))
+	})
+}
+
+// getPassword извлекает и расшифровывает пароль из BoltDB
+func getPassword(db *bolt.DB, service string) (string, error) {
+	var encryptedPass []byte
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketName))
+		encryptedPass = b.Get([]byte(service))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if encryptedPass == nil {
+		return "", fmt.Errorf("password not found")
+	}
+	return decrypt(string(encryptedPass))
+}
+
+// deletePassword удаляет пароль из BoltDB
+func deletePassword(db *bolt.DB, service string) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketName))
+		return b.Delete([]byte(service))
+	})
+}
+
+func main() {
+	db, err := bolt.Open(dbFile, 0600, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// Создание хранилища паролей, если оно отсутствует
+	db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(bucketName))
+		return err
+	})
+
+	for {
+		fmt.Println("1. Сохранить пароль")
+		fmt.Println("2. Получить пароль")
+		fmt.Println("3. Удалить пароль")
+		fmt.Println("4. Выход")
+		fmt.Print("Выберите действие: ")
+
+		var choice int
+		fmt.Scan(&choice)
+
+		switch choice {
+		case 1:
+			fmt.Print("Введите название сервиса: ")
+			var service, password string
+			fmt.Scan(&service)
+			fmt.Print("Введите пароль: ")
+			fmt.Scan(&password)
+			if err := savePassword(db, service, password); err != nil {
+				fmt.Println("Ошибка сохранения:", err)
+			} else {
+				fmt.Println("Пароль сохранен!")
+			}
+		case 2:
+			fmt.Print("Введите название сервиса: ")
+			var service string
+			fmt.Scan(&service)
+			password, err := getPassword(db, service)
+			if err != nil {
+				fmt.Println("Ошибка:", err)
+			} else {
+				fmt.Println("Пароль:", password)
+			}
+		case 3:
+			fmt.Print("Введите название сервиса: ")
+			var service string
+			fmt.Scan(&service)
+			if err := deletePassword(db, service); err != nil {
+				fmt.Println("Ошибка удаления:", err)
+			} else {
+				fmt.Println("Пароль удален!")
+			}
+		case 4:
+			fmt.Println("Выход...")
+			os.Exit(0)
+		default:
+			fmt.Println("Некорректный ввод")
+		}
+	}
+}
